@@ -7,28 +7,27 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include "ESP8266httpUpdate.h"
+#include <ESP8266WebServer.h>
+#include <EEPROM.h>
+#include "DHT.h"
 
 #ifndef STASSID
-#define STASSID "Lord of the ping"
-#define STAPSK  "*******"
+#define STASSID "empySSID"
+#define STAPSK  "emptyPASSWORD"
 #endif
 
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
-const char* ssid = STASSID;
-const char* password = STAPSK;
-const char* version = "1.5";
+#define DHTINTERNAL 3
+#define DHTEXTERNAL 4
+#define DHTTYPE DHT22
+
 
 #define LOGO_HEIGHT   64
 #define LOGO_WIDTH    128
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
-
-float internalHumidity = 0.0f;
-float externalHumidity = 0.0f;
-
-char* serverName = "http://simonroy.pythonanywhere.com/api/publish_humidity/";
 
 static const unsigned char PROGMEM logo_bmp[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -96,11 +95,48 @@ static const unsigned char PROGMEM logo_bmp[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
+
+//Variables
+int i = 0;
+int statusCode;
+const char* ssid = "text";
+const char* password = "text";
+String st;
+String content;
+const char* version = "1.5";
+float internalHumidity = 0.0f;
+float externalHumidity = 0.0f;
+char* serverName = "http://simonroy.pythonanywhere.com/api/publish_humidity/";
+
+
+//Function Declaration
+bool testWifi(void);
+void launchWeb(void);
+void createWebServer(void);
+void setupAP(void);
+void scanNetwork(void);
+void sendHumidity(int internal, int external);
+void drawHumidityScreen(void);
+void drawSplashScreen(void);
+void drawUpdateScreen(void);
+void drawHeader(void);
+void checkUpdate(void);
+
+//--------Establishing Local server at port 80 whenever required
+ESP8266WebServer server(80);
+
+DHT dhtInternal(DHTINTERNAL, DHTTYPE);
+DHT dhtExternal(DHTEXTERNAL, DHTTYPE);
+
+
+
 void setup() {
   pinMode(2, OUTPUT);
   randomSeed(analogRead(0));
-  
+  WiFi.disconnect();
   Serial.begin(115200);
+  EEPROM.begin(512); //Initializing EEPROM
+  delay(10);
   Serial.println("Booting");
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
@@ -108,106 +144,301 @@ void setup() {
   }
   // Clear the buffer
   display.clearDisplay();
-
   drawSplashScreen(); // Draw the logo
 
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
-  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-    Serial.println("Connection Failed! Rebooting...");
-    delay(5000);
-    ESP.restart();
+  // Read eeprom for ssid and password
+  Serial.println("Reading EEPROM ssid");
+
+  String esid;
+  for (int i = 0; i < 32; ++i)
+  {
+    esid += char(EEPROM.read(i));
   }
+  Serial.println();
+  Serial.print("SSID: ");
+  Serial.println(esid);
+  Serial.println("Reading EEPROM pass");
 
-  // Port defaults to 8266
-  // ArduinoOTA.setPort(8266);
+  String epass = "";
+  for (int i = 32; i < 96; ++i)
+  {
+    epass += char(EEPROM.read(i));
+  }
+  Serial.print("PASS: ");
+  Serial.println(epass);
 
-  // Hostname defaults to esp8266-[ChipID]
-  // ArduinoOTA.setHostname("myesp8266");
+  WiFi.begin(esid.c_str(), epass.c_str());
+  if (testWifi())
+  {
+    Serial.println("Succesfully Connected!!!");
+    ArduinoOTA.onStart([]() {
+      String type;
+      if (ArduinoOTA.getCommand() == U_FLASH) {
+        type = "sketch";
+      } else { // U_FS
+        type = "filesystem";
+      }
 
-  // No authentication by default
-  // ArduinoOTA.setPassword("admin");
+      // NOTE: if updating FS this would be the place to unmount FS using FS.end()
+      Serial.println("Start updating " + type);
+    });
+    ArduinoOTA.onEnd([]() {
+      Serial.println("\nEnd");
+    });
+    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+    });
+    ArduinoOTA.onError([](ota_error_t error) {
+      Serial.printf("Error[%u]: ", error);
+      if (error == OTA_AUTH_ERROR) {
+        Serial.println("Auth Failed");
+      } else if (error == OTA_BEGIN_ERROR) {
+        Serial.println("Begin Failed");
+      } else if (error == OTA_CONNECT_ERROR) {
+        Serial.println("Connect Failed");
+      } else if (error == OTA_RECEIVE_ERROR) {
+        Serial.println("Receive Failed");
+      } else if (error == OTA_END_ERROR) {
+        Serial.println("End Failed");
+      }
+    });
+    ArduinoOTA.begin();
+    Serial.println("Ready");
+    Serial.print("IP address: ");
+    Serial.println(WiFi.localIP());
+    IPAddress dns(8, 8, 8, 8);
+    checkUpdate();
+    return;
+  }
+  else
+  {
+    Serial.println("Turning the HotSpot On");
+    launchWeb();
+    setupAP();// Setup accesspoint or HotSpot
+    Serial.println();
+    Serial.println("Waiting.");
 
-  // Password can be set with it's md5 value as well
-  // MD5(admin) = 21232f297a57a5a743894a0e4a801fc3
-  // ArduinoOTA.setPasswordHash("21232f297a57a5a743894a0e4a801fc3");
-
-  ArduinoOTA.onStart([]() {
-    String type;
-    if (ArduinoOTA.getCommand() == U_FLASH) {
-      type = "sketch";
-    } else { // U_FS
-      type = "filesystem";
+    while ((WiFi.status() != WL_CONNECTED))
+    {
+      Serial.print(".");
+      delay(100);
+      server.handleClient();
     }
+  }
+  dhtInternal.begin();
+  dhtExternal.begin();
 
-    // NOTE: if updating FS this would be the place to unmount FS using FS.end()
-    Serial.println("Start updating " + type);
-  });
-  ArduinoOTA.onEnd([]() {
-    Serial.println("\nEnd");
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    Serial.printf("Error[%u]: ", error);
-    if (error == OTA_AUTH_ERROR) {
-      Serial.println("Auth Failed");
-    } else if (error == OTA_BEGIN_ERROR) {
-      Serial.println("Begin Failed");
-    } else if (error == OTA_CONNECT_ERROR) {
-      Serial.println("Connect Failed");
-    } else if (error == OTA_RECEIVE_ERROR) {
-      Serial.println("Receive Failed");
-    } else if (error == OTA_END_ERROR) {
-      Serial.println("End Failed");
-    }
-  });
-  ArduinoOTA.begin();
-  Serial.println("Ready");
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-  IPAddress dns(8, 8, 8, 8);
-  //WiFi.setDNS(dns);
-  //WiFi.dnsIP(dns);
-  checkUpdate();
+
 }
 
 void loop() {
+  if ((WiFi.status() == WL_CONNECTED))
+  {
+    digitalWrite(2, HIGH);
+    delay(3000);
+    digitalWrite(2, LOW);
+    delay(3000);
+    checkUpdate();
+    drawHumidityScreen();
+    ArduinoOTA.handle();
+    //TO DO : Add humidity sensor and remove delay (use millis - time instead)
+    internalHumidity = dhtInternal.readHumidity();
+    externalHumidity = dhtExternal.readHumidity();
+    sendHumidity(internalHumidity, externalHumidity);
 
-  digitalWrite(2, HIGH);
-  delay(3000);
-  digitalWrite(2, LOW);
-  delay(3000);
-  checkUpdate();
-  drawHumidityScreen();
-  ArduinoOTA.handle();
-  //TO DO : Add humidity sensor and remove delay (use millis - time instead)
-  internalHumidity = random(20)+50;
-  externalHumidity = random(20)+70;
-  sendHumidity(internalHumidity, externalHumidity);
+
+    // Add your program code here which the esp8266 has to perform when it connects to network
+
+  }
+}
+
+//Functions used for saving WiFi credentials and to connect to it which you do not need to change
+bool testWifi(void)
+{
+  int c = 0;
+  Serial.println("Waiting for WiFi to connect");
+  while ( c < 20 ) {
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      return true;
+    }
+    delay(500);
+    Serial.print("*");
+    c++;
+  }
+  Serial.println("");
+  Serial.println("Connection timed out, opening AP or Hotspot");
+  return false;
+}
+
+
+void launchWeb()
+{
+  Serial.println("");
+  if (WiFi.status() == WL_CONNECTED)
+    Serial.println("WiFi connected");
+  Serial.print("Local IP: ");
+  Serial.println(WiFi.localIP());
+  Serial.print("SoftAP IP: ");
+  Serial.println(WiFi.softAPIP());
+  createWebServer();
+  // Start the server
+  server.begin();
+  Serial.println("Server started");
+}
+
+
+void setupAP(void)
+{
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  delay(100);
+  scanNetwork();
+}
+
+void scanNetwork() {
+  int n = WiFi.scanNetworks();
+  Serial.println("scan completed");
+  if (n == 0)
+    Serial.println("No WiFi Networks found");
+  else
+  {
+    Serial.print(n);
+    Serial.println(" Networks found");
+    for (int i = 0; i < n; ++i)
+    {
+      // Print SSID and RSSI for each network found
+      Serial.print(i + 1);
+      Serial.print(": ");
+      Serial.print(WiFi.SSID(i));
+      Serial.print(" (");
+      Serial.print(WiFi.RSSI(i));
+      Serial.print(")");
+      Serial.println((WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*");
+      delay(10);
+    }
+  }
+  Serial.println("");
+  st = "<ol>";
+  for (int i = 0; i < n; ++i)
+  {
+    // Print SSID and RSSI for each network found
+    st += "<li>";
+    st += "<button onclick='openModal(\"";
+    st += WiFi.SSID(i);
+    st += "\")'>Choose</button>";
+    st += WiFi.SSID(i);
+    st += " (";
+    st += WiFi.RSSI(i);
+    st += " dbm)";
+    st += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
+    st += "</li>";
+  }
+  st += "</ol>";
+  delay(100);
+  WiFi.softAP("DryBox looking for wifi", "");
+  Serial.println("Initializing_Wifi_accesspoint");
+  launchWeb();
+  Serial.println("over");
+}
+
+void createWebServer()
+{
+  {
+    server.on("/", []() {
+      IPAddress ip = WiFi.softAPIP();
+      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+      content = "<!DOCTYPE HTML>\r\n<html><h1>Welcome to DryBox interface connector ! </h1>";
+      content += "<p> You can choose a wifi in the list here.</p>";
+      // modal
+      content += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
+      content += ipStr;
+      content += st;
+      content += "<div id='myModal' class='modal'><div class='modal-content'><span class='close'>&times;</span><p><form method='get' action='setting'><label>SSID: </label><input id='test' name='ssid' length=32><input name='pass' length=64><input type='submit'></form></p></div></div>";
+      content += "</html>";
+
+      // css and javascript to make the modal work
+      content += "<style>.modal{display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgb(0,0,0); background-color: rgba(0,0,0,0.4);}.modal-content{background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;}.close{color: #aaa; float: right; font-size: 28px; font-weight: bold;}.close:hover,.close:focus{color: black; text-decoration: none; cursor: pointer;}</style>";
+
+      content += "<script>var modal=document.getElementById('myModal');var btn=document.getElementById('myBtn');var span=document.getElementsByClassName('close')[0];function openModal(parameter){modal.style.display='block'; document.getElementById('test').value=parameter}span.onclick=function(){modal.style.display='none';}; window.onclick=function(event){if (event.target==modal){modal.style.display='none';}}</script>";
+
+      server.send(200, "text/html", content);
+    });
+    server.on("/scan", []() {
+      //setupAP();
+      IPAddress ip = WiFi.softAPIP();
+      scanNetwork();
+      String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
+
+      server.sendHeader("Location", String("/"), true);
+      server.send ( 302, "text/plain", "");
+
+    });
+
+    server.on("/setting", []() {
+      String qsid = server.arg("ssid");
+      String qpass = server.arg("pass");
+      if (qsid.length() > 0 && qpass.length() > 0) {
+        Serial.println("clearing eeprom");
+        for (int i = 0; i < 96; ++i) {
+          EEPROM.write(i, 0);
+        }
+        Serial.println(qsid);
+        Serial.println("");
+        Serial.println(qpass);
+        Serial.println("");
+
+        Serial.println("writing eeprom ssid:");
+        for (int i = 0; i < qsid.length(); ++i)
+        {
+          EEPROM.write(i, qsid[i]);
+          Serial.print("Wrote: ");
+          Serial.println(qsid[i]);
+        }
+        Serial.println("writing eeprom pass:");
+        for (int i = 0; i < qpass.length(); ++i)
+        {
+          EEPROM.write(32 + i, qpass[i]);
+          Serial.print("Wrote: ");
+          Serial.println(qpass[i]);
+        }
+        EEPROM.commit();
+
+        content = "{\"Success\":\"saved to eeprom... reset to boot into new wifi\"}";
+        statusCode = 200;
+        ESP.reset();
+      } else {
+        content = "{\"Error\":\"404 not found\"}";
+        statusCode = 404;
+        Serial.println("Sending 404");
+      }
+      server.sendHeader("Access-Control-Allow-Origin", "*");
+      server.send(statusCode, "application/json", content);
+
+    });
+  }
 }
 
 
 void sendHumidity(int internal, int external) {
 
-  
+
   WiFiClient client;
   HTTPClient http;
 
 
-  String serverPath = serverName + String(internal) + "/" + String(external) +"/";
+  String serverPath = serverName + String(internal) + "/" + String(external) + "/";
 
   Serial.println(serverPath);
-    
-  // Your IP address with path or Domain name with URL path 
+
+  // Your IP address with path or Domain name with URL path
   http.begin(client, serverPath.c_str());
   http.addHeader("X-Esp8266-Mac", WiFi.macAddress());
-  
+
   // Send HTTP POST request
   int httpResponseCode = http.GET();
   Serial.println(httpResponseCode);
-  
+
 }
 
 
