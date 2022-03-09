@@ -11,24 +11,21 @@
 #include <EEPROM.h>
 #include "DHT.h"
 
-#ifndef STASSID
-#define STASSID "empySSID"
-#define STAPSK  "emptyPASSWORD"
-#endif
-
 #define SCREEN_WIDTH 128 // OLED display width, in pixels
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 
-#define DHTINTERNAL 3
-#define DHTEXTERNAL 4
-#define DHTTYPE DHT22
+#define DHTINTERNAL 2 // Pin D4 for external humidity sensor
+#define DHTEXTERNAL 0 // Pin D3 for internal humitidy sensor
+#define DHTTYPE DHT22 // Use DHT22 in the project
 
 
-#define LOGO_HEIGHT   64
-#define LOGO_WIDTH    128
+#define LOGO_HEIGHT   64 // Height of the logo
+#define LOGO_WIDTH    128 // Width of the  logo
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+// logo generated with LCD Assistant (https://randomnerdtutorials.com/guide-for-oled-display-with-arduino/)
 static const unsigned char PROGMEM logo_bmp[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -97,17 +94,18 @@ static const unsigned char PROGMEM logo_bmp[] = {
 };
 
 //Variables
-int i = 0;
 int statusCode;
-const char* ssid = "text";
-const char* password = "text";
-String st;
-String content;
-const char* version = "1.5";
-float internalHumidity = 0.0f;
-float externalHumidity = 0.0f;
-char* serverName = "http://simonroy.pythonanywhere.com/api/publish_humidity/";
-
+const char* ssid; // SSID, do not enter ip manualy, see README.MD to learn how to select the wifi network
+const char* password; // Same as SSID
+String ssidListString;
+String htmlContent;
+const char* version = "1.6"; // Increase the firmware version to ensure that the OTA works properly. (Don't forget to also update the firmware version in the server.
+float internalHumidity = 0.0f; // default internal humidity is 0
+float externalHumidity = 0.0f; // default external humidity is 0
+char* serverName = "simonroy.pythonanywhere.com"; // You can either use the server here or create your own server from the source code on github
+float humidityOffset = 0.0f; // The default offset is 0. You can use the "calibrate" button on the website to set an offset. The offset is not store in the eeprom.
+bool otaUpdate = false;
+int KeepAliveLed = 16; // Keep alive LED.
 
 //Function Declaration
 bool testWifi(void);
@@ -121,29 +119,40 @@ void drawSplashScreen(void);
 void drawUpdateScreen(void);
 void drawHeader(void);
 void checkUpdate(void);
+void calibrate(void);
 
-//--------Establishing Local server at port 80 whenever required
+// Establishing Local server at port 80
 ESP8266WebServer server(80);
 
+// Create humidity sensor object
 DHT dhtInternal(DHTINTERNAL, DHTTYPE);
 DHT dhtExternal(DHTEXTERNAL, DHTTYPE);
 
-
-
 void setup() {
-  pinMode(2, OUTPUT);
+  pinMode(KeepAliveLed, OUTPUT);
   randomSeed(analogRead(0));
   WiFi.disconnect();
+  
   Serial.begin(115200);
+  delay(10);
+  
+  dhtInternal.begin();
+  delay(10);
+  
+  dhtExternal.begin();
+  delay(10);
+  
   EEPROM.begin(512); //Initializing EEPROM
   delay(10);
-  Serial.println("Booting");
+  
+  Serial.println("Booting ...");
+  
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
     for (;;); // Don't proceed, loop forever
   }
-  // Clear the buffer
-  display.clearDisplay();
+  
+  display.clearDisplay(); // Clear the display
   drawSplashScreen(); // Draw the logo
 
   // Read eeprom for ssid and password
@@ -225,30 +234,37 @@ void setup() {
       server.handleClient();
     }
   }
-  dhtInternal.begin();
-  dhtExternal.begin();
-
-
 }
 
 void loop() {
+  //TO DO : Add humidity sensor and remove delay (use millis - time instead)
+  internalHumidity = dhtInternal.readHumidity();
+  externalHumidity = dhtExternal.readHumidity();
+
+  if (isnan(internalHumidity)) {
+    internalHumidity = 0;
+  }
+
+  if (isnan(externalHumidity)) {
+    externalHumidity = 0;
+  }
+
+  internalHumidity += humidityOffset;
+
+  Serial.println(internalHumidity);
+  Serial.println(externalHumidity);
+
+  digitalWrite(KeepAliveLed, HIGH);
+  delay(30000);
+  digitalWrite(KeepAliveLed, LOW);
+  delay(30000);
+  checkUpdate();
+  drawHumidityScreen();
+
   if ((WiFi.status() == WL_CONNECTED))
   {
-    digitalWrite(2, HIGH);
-    delay(3000);
-    digitalWrite(2, LOW);
-    delay(3000);
-    checkUpdate();
-    drawHumidityScreen();
     ArduinoOTA.handle();
-    //TO DO : Add humidity sensor and remove delay (use millis - time instead)
-    internalHumidity = dhtInternal.readHumidity();
-    externalHumidity = dhtExternal.readHumidity();
     sendHumidity(internalHumidity, externalHumidity);
-
-
-    // Add your program code here which the esp8266 has to perform when it connects to network
-
   }
 }
 
@@ -318,23 +334,22 @@ void scanNetwork() {
       delay(10);
     }
   }
-  Serial.println("");
-  st = "<ol>";
+  ssidListString = "<ol>";
   for (int i = 0; i < n; ++i)
   {
     // Print SSID and RSSI for each network found
-    st += "<li>";
-    st += "<button onclick='openModal(\"";
-    st += WiFi.SSID(i);
-    st += "\")'>Choose</button>";
-    st += WiFi.SSID(i);
-    st += " (";
-    st += WiFi.RSSI(i);
-    st += " dbm)";
-    st += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
-    st += "</li>";
+    ssidListString += "<li>";
+    ssidListString += "<button onclick='openModal(\"";
+    ssidListString += WiFi.SSID(i);
+    ssidListString += "\")'>Choose</button>";
+    ssidListString += WiFi.SSID(i);
+    ssidListString += " (";
+    ssidListString += WiFi.RSSI(i);
+    ssidListString += " dbm)";
+    ssidListString += (WiFi.encryptionType(i) == ENC_TYPE_NONE) ? " " : "*";
+    ssidListString += "</li>";
   }
-  st += "</ol>";
+  ssidListString += "</ol>";
   delay(100);
   WiFi.softAP("DryBox looking for wifi", "");
   Serial.println("Initializing_Wifi_accesspoint");
@@ -348,21 +363,22 @@ void createWebServer()
     server.on("/", []() {
       IPAddress ip = WiFi.softAPIP();
       String ipStr = String(ip[0]) + '.' + String(ip[1]) + '.' + String(ip[2]) + '.' + String(ip[3]);
-      content = "<!DOCTYPE HTML>\r\n<html><h1>Welcome to DryBox interface connector ! </h1>";
-      content += "<p> You can choose a wifi in the list here.</p>";
+      htmlContent = "<!DOCTYPE HTML>\r\n<html><h1>Welcome to DryBox interface connector ! </h1>";
+      htmlContent += "<p> You can choose a wifi in the list here.</p>";
       // modal
-      content += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
-      content += ipStr;
-      content += st;
-      content += "<div id='myModal' class='modal'><div class='modal-content'><span class='close'>&times;</span><p><form method='get' action='setting'><label>SSID: </label><input id='test' name='ssid' length=32><input name='pass' length=64><input type='submit'></form></p></div></div>";
-      content += "</html>";
+      htmlContent += "<form action=\"/scan\" method=\"POST\"><input type=\"submit\" value=\"scan\"></form>";
+      htmlContent += ipStr;
+      htmlContent += ssidListString;
+      htmlContent += "<div id='myModal' class='modal'><div class='modal-content'><span class='close'>&times;</span><p><form method='get' action='setting'><label>SSID: </label><input id='test' name='ssid' length=32><input name='pass' length=64><input type='submit'></form></p></div></div>";
+      htmlContent += "</html>";
 
-      // css and javascript to make the modal work
-      content += "<style>.modal{display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgb(0,0,0); background-color: rgba(0,0,0,0.4);}.modal-content{background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;}.close{color: #aaa; float: right; font-size: 28px; font-weight: bold;}.close:hover,.close:focus{color: black; text-decoration: none; cursor: pointer;}</style>";
+      // css to make the modal work
+      htmlContent += "<style>.modal{display: none; position: fixed; z-index: 1; left: 0; top: 0; width: 100%; height: 100%; overflow: auto; background-color: rgb(0,0,0); background-color: rgba(0,0,0,0.4);}.modal-content{background-color: #fefefe; margin: 15% auto; padding: 20px; border: 1px solid #888; width: 80%;}.close{color: #aaa; float: right; font-size: 28px; font-weight: bold;}.close:hover,.close:focus{color: black; text-decoration: none; cursor: pointer;}</style>";
 
-      content += "<script>var modal=document.getElementById('myModal');var btn=document.getElementById('myBtn');var span=document.getElementsByClassName('close')[0];function openModal(parameter){modal.style.display='block'; document.getElementById('test').value=parameter}span.onclick=function(){modal.style.display='none';}; window.onclick=function(event){if (event.target==modal){modal.style.display='none';}}</script>";
+      // javascript to make the modal work
+      htmlContent += "<script>var modal=document.getElementById('myModal');var btn=document.getElementById('myBtn');var span=document.getElementsByClassName('close')[0];function openModal(parameter){modal.style.display='block'; document.getElementById('test').value=parameter}span.onclick=function(){modal.style.display='none';}; window.onclick=function(event){if (event.target==modal){modal.style.display='none';}}</script>";
 
-      server.send(200, "text/html", content);
+      server.send(200, "text/html", htmlContent);
     });
     server.on("/scan", []() {
       //setupAP();
@@ -404,16 +420,16 @@ void createWebServer()
         }
         EEPROM.commit();
 
-        content = "{\"Success\":\"saved to eeprom... reset to boot into new wifi\"}";
+        htmlContent = "{\"Success\":\"saved to eeprom... reset to boot into new wifi\"}";
         statusCode = 200;
         ESP.reset();
       } else {
-        content = "{\"Error\":\"404 not found\"}";
+        htmlContent = "{\"Error\":\"404 not found\"}";
         statusCode = 404;
         Serial.println("Sending 404");
       }
       server.sendHeader("Access-Control-Allow-Origin", "*");
-      server.send(statusCode, "application/json", content);
+      server.send(statusCode, "application/json", htmlContent);
 
     });
   }
@@ -421,36 +437,49 @@ void createWebServer()
 
 
 void sendHumidity(int internal, int external) {
-
-
   WiFiClient client;
   HTTPClient http;
 
+  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal) + "/" + String(external) + "/";
 
-  String serverPath = serverName + String(internal) + "/" + String(external) + "/";
-
-  Serial.println(serverPath);
-
-  // Your IP address with path or Domain name with URL path
   http.begin(client, serverPath.c_str());
+  Serial.println("Mac adresse (for the server) : " + WiFi.macAddress());
   http.addHeader("X-Esp8266-Mac", WiFi.macAddress());
 
   // Send HTTP POST request
   int httpResponseCode = http.GET();
   Serial.println(httpResponseCode);
 
+  if (httpResponseCode == 205) {
+    calibrate();
+  }
+
 }
 
+void calibrate(void) {
+  internalHumidity = dhtInternal.readHumidity();
+  externalHumidity = dhtExternal.readHumidity();
+  if (isnan(internalHumidity)) {
+    internalHumidity = 0;
+  }
+
+  if (isnan(externalHumidity)) {
+    externalHumidity = 0;
+  }
+  humidityOffset = externalHumidity - internalHumidity;
+  Serial.print("humidity offset  : " + String(humidityOffset));
+}
 
 void drawHumidityScreen(void) {
   drawHeader();
   display.setTextSize(2);      // Normal 1:1 pixel scale
   display.cp437(true);         // Use full 256 char 'Code Page 437' font
 
-  // Not all the characters will fit on the display. This is normal.
-  // Library will draw what it can and the rest will be clipped.
-  display.write("In : 40%\n");
-  display.write("Out : 60%");
+  display.write("In:  ");
+  display.print(internalHumidity, 1);
+  display.write("%\nOut: ");
+  display.print(externalHumidity, 1);
+  display.write("%");
 
   display.display();
 }
@@ -458,7 +487,6 @@ void drawHumidityScreen(void) {
 void drawSplashScreen(void) {
   drawHeader();
   display.clearDisplay();
-
   display.drawBitmap(
     (display.width()  - LOGO_WIDTH ) / 2,
     (display.height() - LOGO_HEIGHT) / 2,
@@ -470,8 +498,6 @@ void drawUpdateScreen(void) {
   display.setTextSize(2);      // Normal 1:1 pixel scale
   display.cp437(true);         // Use full 256 char 'Code Page 437' font
 
-  // Not all the characters will fit on the display. This is normal.
-  // Library will draw what it can and the rest will be clipped.
   display.write("Updating.. \n\n");
   display.setTextSize(1);
   display.write("Do not turn off");
@@ -485,24 +511,33 @@ void drawHeader(void) {
   display.setCursor(0, 0);     // Start at top-left corner
   display.setTextColor(WHITE); // Draw white text
   //const char[] headerText = "Wifi : On    V" + version + "\n\n";
-  display.write("Wifi : On    V");
+  display.write("OTA : ");
+  if(otaUpdate){
+    display.write("on ");
+  } else {
+    display.write("off");
+  }
+  display.write("    V");
   display.write(version);
   display.write("\n\n");
 }
 
 void checkUpdate(void) {
   WiFiClient client;
-  t_httpUpdate_return ret = ESPhttpUpdate.update(client, "simonroy.pythonanywhere.com", 80, "/binary/", version);
+  t_httpUpdate_return ret = ESPhttpUpdate.update(client, serverName, 80, "/binary/", version);
   switch (ret) {
     case HTTP_UPDATE_FAILED:
       Serial.println("[update] Update failed.");
+      otaUpdate = false;
       break;
     case HTTP_UPDATE_NO_UPDATES:
       Serial.println("[update] No update.");
+      otaUpdate = true;
       break;
     case HTTP_UPDATE_OK:
-      drawUpdateScreen();
-      Serial.println("[update] Update ok."); // may not be called since we reboot the ESP
+      drawUpdateScreen(); // may not be called since we reboot the ESP
+      otaUpdate = true;
+      Serial.println("[update] Update ok.");
       break;
   }
 }
