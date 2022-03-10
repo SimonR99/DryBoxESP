@@ -113,7 +113,7 @@ void launchWeb(void);
 void createWebServer(void);
 void setupAP(void);
 void scanNetwork(void);
-void sendHumidity(int internal, int external);
+void sendHumidity(float internal, float external);
 void drawHumidityScreen(void);
 void drawSplashScreen(void);
 void drawUpdateScreen(void);
@@ -242,11 +242,11 @@ void loop() {
   externalHumidity = dhtExternal.readHumidity();
 
   if (isnan(internalHumidity)) {
-    internalHumidity = 0;
+    internalHumidity = 0.0f;
   }
 
   if (isnan(externalHumidity)) {
-    externalHumidity = 0;
+    externalHumidity = 0.0f;
   }
 
   internalHumidity += humidityOffset;
@@ -436,11 +436,11 @@ void createWebServer()
 }
 
 
-void sendHumidity(int internal, int external) {
+void sendHumidity(float internal, float external) {
   WiFiClient client;
   HTTPClient http;
 
-  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal) + "/" + String(external) + "/";
+  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal,3) + "/" + String(external,3) + "/";
 
   http.begin(client, serverPath.c_str());
   Serial.println("Mac adresse (for the server) : " + WiFi.macAddress());
