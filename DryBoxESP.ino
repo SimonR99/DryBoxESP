@@ -99,7 +99,7 @@ const char* ssid; // SSID, do not enter ip manualy, see README.MD to learn how t
 const char* password; // Same as SSID
 String ssidListString;
 String htmlContent;
-const char* version = "1.6"; // Increase the firmware version to ensure that the OTA works properly. (Don't forget to also update the firmware version in the server.
+const char* version = "1.8"; // Increase the firmware version to ensure that the OTA works properly. (Don't forget to also update the firmware version in the server.
 float internalHumidity = 0.0f; // default internal humidity is 0
 float externalHumidity = 0.0f; // default external humidity is 0
 char* serverName = "simonroy.pythonanywhere.com"; // You can either use the server here or create your own server from the source code on github
@@ -108,9 +108,12 @@ bool otaUpdate = false;
 int KeepAliveLed = 16; // Keep alive LED.
 unsigned long currentMillis;
 unsigned long startMillisMeasurement;
+unsigned long startMillisUpdate;
 unsigned long startMillisSendData;
-const unsigned long periodMeasurement = 1000;
-const unsigned long periodSendData = 1000 * 60 * 60;
+const unsigned long periodMeasurement = 1000; // 1 second
+const unsigned long periodUpdate = 1000 * 60; // 1 min
+const unsigned long periodSendData = 1000 * 60 * 60; // 1 hour
+boolean networkPortActivate = false; //Set this to true if you want to have the ability to push a new version over your own network (network port).
 
 
 //Function Declaration
@@ -223,7 +226,7 @@ void setup() {
         Serial.println("End Failed");
       }
     });
-
+    ArduinoOTA.begin();
     Serial.println("Ready");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
@@ -232,7 +235,8 @@ void setup() {
     return;
   }
   else
-  {
+  { 
+    // Since the ESP wasn't able to connect to the wifi, create a web server and allow you to add a wifi network to the EEPROM
     Serial.println("Turning the HotSpot On");
     launchWeb();
     setupAP();// Setup accesspoint or HotSpot
@@ -248,23 +252,30 @@ void setup() {
   }
 
   EEPROM.get(96, humidityOffset);
+  Serial.println("humidity offset : " + (String) humidityOffset);
 
 }
 
 void loop() {
 
-
+  // False by default for security reason
+  if(networkPortActivate) {
+    ArduinoOTA.handle();
+  }
 
   currentMillis = millis();  //get the current "time" (actually the number of milliseconds since the program started)
-  if (currentMillis - startMillisMeasurement >= periodMeasurement)  //test whether the period has elapsed
+
+  // Do humidity measurement (1 sec)
+  if (currentMillis - startMillisMeasurement >= periodMeasurement)  //test whether the period has elapsed (by default 1 seconds)
   {
-    startMillisMeasurement = currentMillis;  //IMPORTANT to save the start time of the current LED state.
-    internalHumidity = dhtInternal.readHumidity();
+    startMillisMeasurement = currentMillis;  // reset the start value to the actual time
+    internalHumidity = dhtInternal.readHumidity(); 
     externalHumidity = dhtExternal.readHumidity();
     if (isnan(internalHumidity)) {
       internalHumidity = 0.0f;
     }
     if (internalHumidity >= 99.8f) {
+      // if the humidity get too low, the return value will be 99.9.
       internalHumidity = 0.0f;
     }
 
@@ -275,21 +286,37 @@ void loop() {
     Serial.println(internalHumidity);
     Serial.println(externalHumidity);
 
+    // Redraw the screen
     drawHumidityScreen();
   }
-  if (currentMillis - startMillisSendData >= periodSendData)  //test whether the period has elapsed
+
+  // check update (1 min)
+  if (currentMillis - startMillisUpdate >= periodUpdate)  //test whether the period has elapsed (by default, 1h)
+  {
+    startMillisUpdate = currentMillis;  //IMPORTANT to save the start time of the current LED state.
+    if ((WiFi.status() == WL_CONNECTED))
+    {
+      checkUpdate();
+      Serial.println("checking update");
+    }
+  }
+
+  // send data (1 h)
+  if (currentMillis - startMillisSendData >= periodSendData)  //test whether the period has elapsed (by default, 1h)
   {
     startMillisSendData = currentMillis;  //IMPORTANT to save the start time of the current LED state.
     if ((WiFi.status() == WL_CONNECTED))
     {
-      checkUpdate();
-      ArduinoOTA.handle();
+      Serial.println("Sending data");
       sendHumidity(internalHumidity, externalHumidity);
     }
   }
 }
 
-//Functions used for saving WiFi credentials and to connect to it which you do not need to change
+/**
+ * Functions used for saving WiFi credentials and to connect to it which you do not need to change
+ * @return bool reprensenting if the wifi is working or not
+ */
 bool testWifi(void)
 {
   int c = 0;
@@ -308,7 +335,9 @@ bool testWifi(void)
   return false;
 }
 
-
+/**
+ * Function that launch a web server and AP to allow you to enter the wifi credential
+ */
 void launchWeb()
 {
   Serial.println("");
@@ -319,12 +348,15 @@ void launchWeb()
   Serial.print("SoftAP IP: ");
   Serial.println(WiFi.softAPIP());
   createWebServer();
+  
   // Start the server
   server.begin();
   Serial.println("Server started");
 }
 
-
+/**
+ * Function that allow you to setup the access point
+ */
 void setupAP(void)
 {
   WiFi.mode(WIFI_STA);
@@ -333,6 +365,9 @@ void setupAP(void)
   scanNetwork();
 }
 
+/**
+ * Function that scan the network to find each wifi available and the associate power (db)
+ */
 void scanNetwork() {
   int n = WiFi.scanNetworks();
   Serial.println("scan completed");
@@ -378,6 +413,9 @@ void scanNetwork() {
   Serial.println("over");
 }
 
+/**
+ * Function that create the web page used to enter the wifi credential.
+ */
 void createWebServer()
 {
   {
@@ -456,13 +494,17 @@ void createWebServer()
   }
 }
 
-
+/**
+ * Function that send the humidity to the server
+ * @param internal : float reprenting the internal humidity
+ * @param external : float reprenting the external humidity
+ */
 void sendHumidity(float internal, float external) {
   WiFiClient client;
   HTTPClient http;
 
-  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal, 3) + "/" + String(external, 3) + "/";
-
+  String serverPath = "http://" + String(serverName) +  "/api/publish_humidity/" + String(internal, 3) + "/" + String(external, 3) + "/";
+  Serial.println("url : " + serverPath);
   http.begin(client, serverPath.c_str());
   Serial.println("Mac adresse (for the server) : " + WiFi.macAddress());
   http.addHeader("X-Esp8266-Mac", WiFi.macAddress());
@@ -471,12 +513,14 @@ void sendHumidity(float internal, float external) {
   int httpResponseCode = http.GET();
   Serial.println(httpResponseCode);
 
+  // The web server use response code to limite the amount of data on the network.
   if (httpResponseCode == 205) {
     calibrate();
   }
-
 }
-
+/**
+ * Function that take the difference between the two sensor and adjust their values to be equal.
+ */
 void calibrate(void) {
   internalHumidity = dhtInternal.readHumidity();
   externalHumidity = dhtExternal.readHumidity();
@@ -492,25 +536,26 @@ void calibrate(void) {
 
   Serial.println("writing calibration :");
   EEPROM.put(humidityOffset, 96);
-
-
-
 }
 
+/**
+ * Function that draw the informations on the screen
+ */
 void drawHumidityScreen(void) {
   drawHeader();
   display.setTextSize(2);      // Normal 1:1 pixel scale
   display.cp437(true);         // Use full 256 char 'Code Page 437' font
-
   display.write("In:  ");
   display.print(internalHumidity, 1);
   display.write("%\nOut: ");
   display.print(externalHumidity, 1);
   display.write("%");
-
   display.display();
 }
 
+/**
+ * Function that draw the splash screen (while waiting for wifi)
+ */
 void drawSplashScreen(void) {
   drawHeader();
   display.clearDisplay();
@@ -521,17 +566,21 @@ void drawSplashScreen(void) {
   display.display();
 }
 
+/**
+ * Function that draw the update screen (might not be called since the reboot is usualy done before)
+ */
 void drawUpdateScreen(void) {
   display.setTextSize(2);      // Normal 1:1 pixel scale
   display.cp437(true);         // Use full 256 char 'Code Page 437' font
-
   display.write("Updating.. \n\n");
   display.setTextSize(1);
   display.write("Do not turn off");
-
   display.display();
 }
 
+/**
+ * Function that draw the header of the display (show ota state and version)
+ */
 void drawHeader(void) {
   display.clearDisplay();
   display.setTextSize(1);
@@ -549,6 +598,9 @@ void drawHeader(void) {
   display.write("\n\n");
 }
 
+/**
+ * Function that check if there is a new version of the code on the server.
+ */
 void checkUpdate(void) {
   WiFiClient client;
   t_httpUpdate_return ret = ESPhttpUpdate.update(client, serverName, 80, "/binary/", version);
