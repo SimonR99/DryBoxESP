@@ -106,6 +106,12 @@ char* serverName = "simonroy.pythonanywhere.com"; // You can either use the serv
 float humidityOffset = 0.0f; // The default offset is 0. You can use the "calibrate" button on the website to set an offset. The offset is not store in the eeprom.
 bool otaUpdate = false;
 int KeepAliveLed = 16; // Keep alive LED.
+unsigned long currentMillis;
+unsigned long startMillisMeasurement;
+unsigned long startMillisSendData;
+const unsigned long periodMeasurement = 1000;
+const unsigned long periodSendData = 1000 * 60 * 60;
+
 
 //Function Declaration
 bool testWifi(void);
@@ -132,50 +138,56 @@ void setup() {
   pinMode(KeepAliveLed, OUTPUT);
   randomSeed(analogRead(0));
   WiFi.disconnect();
-  
+
   Serial.begin(115200);
   delay(10);
-  
+
   dhtInternal.begin();
   delay(10);
-  
+
   dhtExternal.begin();
   delay(10);
-  
+
   EEPROM.begin(512); //Initializing EEPROM
   delay(10);
-  
+
   Serial.println("Booting ...");
-  
+
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("SSD1306 allocation failed"));
     for (;;); // Don't proceed, loop forever
   }
-  
+
   display.clearDisplay(); // Clear the display
   drawSplashScreen(); // Draw the logo
 
   // Read eeprom for ssid and password
   Serial.println("Reading EEPROM ssid");
 
+  // the wifi ssid is on the first 32 bytes of the EEPROM
   String esid;
   for (int i = 0; i < 32; ++i)
   {
     esid += char(EEPROM.read(i));
   }
-  Serial.println();
-  Serial.print("SSID: ");
-  Serial.println(esid);
-  Serial.println("Reading EEPROM pass");
-
+  // the wifi password is usually longer. The next 64 bytes are reserve for the wifi password.
   String epass = "";
   for (int i = 32; i < 96; ++i)
   {
     epass += char(EEPROM.read(i));
   }
+
+  // Print SSID and wifi password (use if for debug if you aren't able to connect to wifi)
+  /*
+  Serial.println();
+  Serial.print("SSID: ");
+  Serial.println(esid);
+  Serial.println("Reading EEPROM pass");
   Serial.print("PASS: ");
   Serial.println(epass);
+  */
 
+  //Try to connect to wifi 20 times before giving up
   WiFi.begin(esid.c_str(), epass.c_str());
   if (testWifi())
   {
@@ -211,7 +223,7 @@ void setup() {
         Serial.println("End Failed");
       }
     });
-    ArduinoOTA.begin();
+
     Serial.println("Ready");
     Serial.print("IP address: ");
     Serial.println(WiFi.localIP());
@@ -234,37 +246,46 @@ void setup() {
       server.handleClient();
     }
   }
+
+  EEPROM.get(96, humidityOffset);
+
 }
 
 void loop() {
-  //TO DO : Add humidity sensor and remove delay (use millis - time instead)
-  internalHumidity = dhtInternal.readHumidity();
-  externalHumidity = dhtExternal.readHumidity();
 
-  if (isnan(internalHumidity)) {
-    internalHumidity = 0.0f;
-  }
 
-  if (isnan(externalHumidity)) {
-    externalHumidity = 0.0f;
-  }
 
-  internalHumidity += humidityOffset;
-
-  Serial.println(internalHumidity);
-  Serial.println(externalHumidity);
-
-  digitalWrite(KeepAliveLed, HIGH);
-  delay(30000);
-  digitalWrite(KeepAliveLed, LOW);
-  delay(30000);
-  checkUpdate();
-  drawHumidityScreen();
-
-  if ((WiFi.status() == WL_CONNECTED))
+  currentMillis = millis();  //get the current "time" (actually the number of milliseconds since the program started)
+  if (currentMillis - startMillisMeasurement >= periodMeasurement)  //test whether the period has elapsed
   {
-    ArduinoOTA.handle();
-    sendHumidity(internalHumidity, externalHumidity);
+    startMillisMeasurement = currentMillis;  //IMPORTANT to save the start time of the current LED state.
+    internalHumidity = dhtInternal.readHumidity();
+    externalHumidity = dhtExternal.readHumidity();
+    if (isnan(internalHumidity)) {
+      internalHumidity = 0.0f;
+    }
+    if (internalHumidity >= 99.8f) {
+      internalHumidity = 0.0f;
+    }
+
+    if (isnan(externalHumidity)) {
+      externalHumidity = 0.0f;
+    }
+    internalHumidity += humidityOffset;
+    Serial.println(internalHumidity);
+    Serial.println(externalHumidity);
+
+    drawHumidityScreen();
+  }
+  if (currentMillis - startMillisSendData >= periodSendData)  //test whether the period has elapsed
+  {
+    startMillisSendData = currentMillis;  //IMPORTANT to save the start time of the current LED state.
+    if ((WiFi.status() == WL_CONNECTED))
+    {
+      checkUpdate();
+      ArduinoOTA.handle();
+      sendHumidity(internalHumidity, externalHumidity);
+    }
   }
 }
 
@@ -396,7 +417,7 @@ void createWebServer()
       String qpass = server.arg("pass");
       if (qsid.length() > 0 && qpass.length() > 0) {
         Serial.println("clearing eeprom");
-        for (int i = 0; i < 96; ++i) {
+        for (int i = 0; i < 96 + sizeof(float); ++i) {
           EEPROM.write(i, 0);
         }
         Serial.println(qsid);
@@ -440,7 +461,7 @@ void sendHumidity(float internal, float external) {
   WiFiClient client;
   HTTPClient http;
 
-  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal,3) + "/" + String(external,3) + "/";
+  String serverPath = "http://simonroy.pythonanywhere.com/api/publish_humidity/" + String(internal, 3) + "/" + String(external, 3) + "/";
 
   http.begin(client, serverPath.c_str());
   Serial.println("Mac adresse (for the server) : " + WiFi.macAddress());
@@ -468,6 +489,12 @@ void calibrate(void) {
   }
   humidityOffset = externalHumidity - internalHumidity;
   Serial.print("humidity offset  : " + String(humidityOffset));
+
+  Serial.println("writing calibration :");
+  EEPROM.put(humidityOffset, 96);
+
+
+
 }
 
 void drawHumidityScreen(void) {
@@ -512,7 +539,7 @@ void drawHeader(void) {
   display.setTextColor(WHITE); // Draw white text
   //const char[] headerText = "Wifi : On    V" + version + "\n\n";
   display.write("OTA : ");
-  if(otaUpdate){
+  if (otaUpdate) {
     display.write("on ");
   } else {
     display.write("off");
